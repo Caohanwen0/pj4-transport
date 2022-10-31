@@ -1,8 +1,30 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse, socket, time, json, select, struct, sys, math, datetime
+
+# Hyper parameters
+#########################################
 
 DATA_SIZE = 1375
+ADVERATISED_WINDOW = 2
+INITIAL_RTT = 0.1
+
+# Field names
+#########################################
+
+# Message Fields
+SEQN = "sequence"
+DATA = "data"
+ACK = "ack"
+SYN = "syn"
+EOF = "eof"
+
+# Packet Fields
+MSG = "mesage"
+TIME = "time"
+RT = "retransmission"
+
+#########################################
 
 class Sender:
     def __init__(self, host, port):
@@ -13,14 +35,51 @@ class Sender:
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
 
-    def log(self, message):
-        sys.stderr.write(message + "\n")
+        self.sequence_num = 0
+        self.transmit_complete = False
+        self.sent_packet = dict() # keep track of the sent packet
+
+    def log(self, message): # print to stderr for debug
+        sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + message + "\n")
         sys.stderr.flush()
 
     def send(self, message):
-        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
+        # self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
+        if self.transmit_complete:
+            return
+        msg = {
+            SEQN : self.sequence_num,
+            DATA : "",
+            ACK : False,
+            EOF : False, 
+        }
+        overhead = len(json.dumps(msg))
+        msg[DATA] = sys.stdin.read(DATA_SIZE - overhead) # readin data from stdin
+        if len(msg[DATA]) <= 0:
+            msg = {
+                SEQN : self.sequence_num,
+                DATA : "",
+                ACK : False,
+                EOF : True,
+            }
+            self.transmit_complete = True
+        # send packet
+        try:
+            assert self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port)) < len(msg)
+            self.sent_packet[self.sequence_num] = {
+                MSG : msg,
+                TIME : time.time(),
+                RT : 0,
+            }
+            self.sequence_num += len(msg[DATA])
+        except:
+            self.log(f"send {self.sequence_num} data fail.")
+
 
     def run(self):
+        while len(self.sent_packet) < ADVERATISED_WINDOW and (not self.transmit_complete):
+            self.send()
+        
         while True:
             sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
 
