@@ -1,16 +1,17 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse
-import json
-import select
-import socket
-import sys
-import zlib
+import argparse, socket, time, json, select, struct, sys, math, datetime
 
 ENCODING = "utf-8"
+
+################################
+
+#Message Field
 SEQN = "sequence num"
-MSG = "msg"
 DATA = "data"
+MSG = "msg"
+
+################################
 
 # Handles receiving/outputting data messages and sending ACKs to the sender
 class Receiver:
@@ -21,14 +22,18 @@ class Receiver:
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # the connection to the sender
         self.socket.bind(('0.0.0.0', 0))
-        self.port = self.socket.getsockname()[1]  # the UPD port chosen for this receiver
+        self.port = self.socket.getsockname()[1] 
         log("Bound to port %d" % self.port)
 
-        self.remote_host = None  # the domain name or IP address of the sender
-        self.remote_port = None  # the UDP port of the sender
+        self.remote_host = None  
+        self.remote_port = None 
 
-        self.packets = []  # the data whose indices correspond to packets that have been received
-        self.output_index = -1  # the index of the last packet that has been outputted
+        self.packets = [] 
+        self.output_num = -1 
+
+    def log(self, message):
+      sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + message + "\n")
+      sys.stderr.flush()
 
     def run(self):
         """
@@ -126,10 +131,10 @@ class Receiver:
         Stops outputting when there is no more data or portion of the data are missing.
         """
 
-        for i in range(self.output_index + 1, len(self.packets)):
+        for i in range(self.output_num + 1, len(self.packets)):
             pkt = self.packets[i]
             if self.was_received(i):
-                self.output_index = i
+                self.output_num = i
                 print(pkt, end='', flush=True)
             else:
                 # missing data, stop outputting
