@@ -1,0 +1,167 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math, datetime, zlib, functools
+
+ENCODING = 'utf-8'
+DATA_SIZE = 1425
+MSG_SIZE = 1500
+WINDOW_SIZE = 2 
+
+################################
+
+#Message Field
+SEQN = "sequence num"
+DATA = "data"
+MSG = "msg"
+
+################################
+
+def get_time(): # ms in int
+    return int(time.time() * 1000)
+
+def log(message):
+    sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + message + "\n")
+    sys.stderr.flush()
+
+class Packet:
+    def __init__(self, seq_num, data, acked, send_time):
+        self.seq_num = seq_num
+        self.data = data
+        self.acked = acked
+        self.send_time = send_time
+
+    def was_sent(self):
+        return self.send_time is not None
+
+    # determine if this packet is sent but not acked(still flying)
+    def in_transit(self):
+        return self.was_sent() and not self.acked
+    
+    # return dict 
+    def get_msg_dct(self)->dict:
+        self.send_time = get_time()
+        msg = { MSG: {
+            SEQN: self.seq_num, 
+            DATA: self.data
+            } 
+        }
+        return msg
+
+# Handles sending data packets and receiving ACks
+class Sender:
+    def __init__(self, host, port):
+        self.host = host 
+        self.remote_port = int(port)  
+        log("Sender starting up using port %s" % self.remote_port)
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(('0.0.0.0', 0))
+
+        self.sent_packets = []
+        # todo... about congestion control, yada, yada
+    
+    def log(self, message): # print to stderr for debug
+      sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + message + "\n")
+      sys.stderr.flush()
+    
+    def send_msg(self, message:dict):
+        self.socket.sendto(json.dumps(message).encode(CODING), (self.host, self.remote_port))
+
+    # read input from stdin
+    def read_input(self):
+        log(f"Reading data from stdin.")
+        data = sys.stdin.read(DATA_SIZE)
+        while len(data) > 0:
+            self.sent_packets.append(Packet(len(self.sent_packets), data, False, None))
+            data = sys.stdin.read(DATA_SIZE)
+        log(f'Reading data get {len(self.sent_packets)} number of packets.')
+
+    def run(self):
+        self.read_input()
+        # send data packets and respond to ACKs
+        while True:
+            inputs = [self.socket]
+            connections = select.select(inputs, [], [], 0.05)[0]
+            for conn in connections:
+                self.recv_ack(conn)
+            # check for dropped packet...
+            # resend...
+            self.send_packets()
+  
+    '''parsing ACK message 
+    If having legal format, return MSG field
+    Otherwise, return None
+    '''
+    @classmethod
+    def parse_ack(cls, data):
+        try: # json format
+            msg = json.loads(data.decode(CODING))
+        except json.decoder.JSONDecodeError:
+            return None
+        
+        if MSG not in msg:
+            return None
+
+        valid_fields = [SEQN,]
+        for field in valid_fields:
+            if field not in msg[MSG]: # check field
+                return None
+        return msg[MSG]
+
+    '''handle the ACK comming from conn'''
+    def recv_ack(self, conn):
+        data, addr = conn.recvfrom(MSG_SIZE)
+        msg = self.parse_ack(data)
+        if msg is None:
+            log('Received corrupted ACK packet.')
+        else:
+            log(f'Received ACK: {json.dumps(msg, indent=2)}')
+
+            packet = self.sent_packets[msg[SEQN]]
+            packet.acked = True # mark the packet as ACKed.
+
+            # todo: congestion control here...
+
+            # exit if all packets have been successfully received
+            if self.all_acked():
+                log('All done!!!')
+                exit(0)
+
+    def window_size(self):
+        return WINDOW_SIZE
+    
+    '''count the packets that are in transit'''
+    def in_transit(self):
+        return functools.reduce(lambda total, 
+            packet: total + (1 if packet.in_transit() else 0), 
+            self.sent_packets, 0)
+
+    '''send all packets at current window'''
+    def send_packets(self):
+        # todo...window size
+        window = self.window_size() - self.in_transit()
+        log(f"Current maximum window size is {window}.")
+        i = 0
+        while i < len(self.sent_packets) and window > 0:
+            packet = self.sent_packets[i]
+            if not packet.was_sent():
+                log(f"Sending data to receiver: sequence number is {i}")
+                self.send_msg(packet.get_msg_dct())
+                window -= 1
+            i += 1
+
+    '''check if all sent packets have been acked'''
+    def all_acked(self):
+        return functools.reduce(lambda rest, packet: packet.acked and rest, self.sent_packets)
+
+    '''count all packets to see how many are in in-transit state'''
+    def in_transit(self):
+        return functools.reduce(lambda total, pkt: total + (1 if pkt.in_transit() else 0), self.sent_packets, 0)
+
+if __name__ == "__main__":
+  parser = argparse.ArgumentParser(description='send data')
+  parser.add_argument('host', type=str, help="Remote host to connect to")
+  parser.add_argument('port', type=int, help="UDP port number to connect to")
+  args = parser.parse_args()
+  sender = Sender(args.host, args.port)
+  sender.run()
