@@ -31,6 +31,9 @@ class Receiver:
         self.packets = [] 
         self.output_num = -1 
 
+    def send(self, message:dict):
+        self.socket.sendto(json.dumps(message).encode(ENCODING), (self.remote_host, self.remote_port))
+    
     def run(self):
         while True:
             connections = select.select([self.socket], [], [])[0]
@@ -57,7 +60,7 @@ class Receiver:
 
             if not self.was_received(msg[SEQN]):
                 # this is a new packet
-                self.insert_packet(msg[DATA], msg[SEQN])
+                self.cache_packet(msg[DATA], msg[SEQN])
                 self.print_output()
 
     
@@ -72,10 +75,10 @@ class Receiver:
         except json.decoder.JSONDecodeError:
             return None
 
-        if MSG not in decoded:
+        if MSG not in decoded: # check dict field
             return None
 
-        fields = [SEQN, DATA] # check dict fields
+        fields = [SEQN, DATA,] # check dict fields
         for f in fields:
             if f not in decoded[MSG]:
                 return None
@@ -88,32 +91,28 @@ class Receiver:
         log(f'Sending ACK with sequence number {seq_num}.')
         self.send(msg)
 
-    def send(self, message:dict):
-        self.socket.sendto(json.dumps(message).encode(ENCODING), (self.remote_host, self.remote_port))
+    '''whether the packet was received'''
+    def was_received(self, seq_num):
+        return seq_num < len(self.packets) and self.packets[seq_num] is not None
 
     '''print received data to STDOUT.'''
     def print_output(self):
         for i in range(self.output_num + 1, len(self.packets)):
+            # for every packet that haven't been printed out
             packet = self.packets[i]
             if self.was_received(i):
                 self.output_num = i
                 print(packet, end='', flush=True)
-            else:
+            else: # if encounter a dropped packet
                 return
 
     '''store the new arrived packet in the self.packets list.'''
-    def insert_packet(self, packet, seq_num):
+    def cache_packet(self, packet, seq_num):
         if seq_num >= len(self.packets):
             self.packets += [None for _ in range(seq_num - len(self.packets))]
             self.packets.append(packet)
         else:
             self.packets[seq_num] = packet
-
-    '''whether the packet was received'''
-    def was_received(self, seq_num):
-        return seq_num < len(self.packets) and self.packets[seq_num] is not None
-
-
 
 # runs the receiver program
 if __name__ == '__main__':

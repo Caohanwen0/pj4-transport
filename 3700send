@@ -5,8 +5,8 @@ from functools import reduce
 
 ENCODING = "utf-8"
 WINDOW_SIZE = 2
-DATA_SIZE = 1425  # the maximum amount of data sent in one packet in bytes
-MSG_SIZE = 1500  # the maximum size of a message in bytes that the sender expects to receive
+DATA_SIZE = 1425  # the maximum data size of one packet
+MSG_SIZE = 1500  # the maximum size of message
 
 ################################
 
