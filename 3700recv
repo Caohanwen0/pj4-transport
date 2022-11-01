@@ -7,6 +7,10 @@ import socket
 import sys
 import zlib
 
+ENCODING = "utf-8"
+SEQN = "sequence num"
+MSG = "msg"
+DATA = "data"
 
 # Handles receiving/outputting data messages and sending ACKs to the sender
 class Receiver:
@@ -58,12 +62,12 @@ class Receiver:
             log('Received corrupted message')
         else:
             # message was not corrupted
-            log(f"Received data message, idx: {msg['index']}")
-            self.send_ack(msg['index'])
+            log(f"Received data message, idx: {msg[SEQN]}")
+            self.send_ack(msg[SEQN])
 
-            if not self.was_received(msg['index']):
+            if not self.was_received(msg[SEQN]):
                 # this is a new packet
-                self.insert_packet(msg['data'], msg['index'])
+                self.insert_packet(msg[DATA], msg[SEQN])
                 self.output_data()
 
     @classmethod
@@ -78,25 +82,22 @@ class Receiver:
 
         # parse json
         try:
-            msg = json.loads(data.decode('utf-8'))
+            msg = json.loads(data.decode(ENCODING))
         except json.decoder.JSONDecodeError:
             return None
 
         # ensure checksum header is valid
-        if 'hash' not in msg or 'msg' not in msg:
+        if MSG not in msg:
             return None
 
         # ensure ack fields are valid
-        fields = ['index', 'data']
+        fields = [SEQN, DATA]
         for f in fields:
-            if f not in msg['msg']:
+            if f not in msg[MSG]:
                 return None
 
         # verify checksum
-        if zlib.crc32(json.dumps(msg['msg'], sort_keys=True).encode('utf-8')) == msg['hash']:
-            return msg['msg']
-        else:
-            return None
+        return msg[MSG]
 
     def send_ack(self, index):
         """
@@ -105,9 +106,8 @@ class Receiver:
             index (int): the index of the data message to acknowledge
         """
 
-        msg = {'index': index}
-        hash_value = zlib.crc32(json.dumps(msg, sort_keys=True).encode('utf-8'))
-        msg = {'hash': hash_value, 'msg': msg}
+        msg = {SEQN: index}
+        msg = { MSG: msg}
         log(f'Sending ACK: index={index}')
         self.send(msg)
 
@@ -118,7 +118,7 @@ class Receiver:
             message (dict): the json object representing the message to send
         """
 
-        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
+        self.socket.sendto(json.dumps(message).encode(ENCODING), (self.remote_host, self.remote_port))
 
     def output_data(self):
         """

@@ -17,6 +17,10 @@ INITIAL_CWND = 1  # the initial value to use for the congestion window in number
 INITIAL_SSTHRESH = 15  # the initial value to use for the slow start threshold in number of packets
 CA_FACTOR = 1  # the factor for increasing the congestion window during congestion avoidance
 
+ENCODING = "utf-8"
+SEQN = "sequence num"
+MSG = "msg"
+DATA = "data"
 
 # represents one data packet that is sent to the receiver
 class Packet:
@@ -60,9 +64,8 @@ class Packet:
             (dict): the message to send to the receiver in json format
         """
         self.send_time = now()
-        msg = {'index': self.index, 'data': self.data}
-        hash_value = zlib.crc32(json.dumps(msg, sort_keys=True).encode('utf-8'))
-        msg = {'hash': hash_value, 'msg': msg}
+        msg = {SEQN: self.index, DATA: self.data}
+        msg = {MSG: msg}
         return msg
 
 
@@ -106,7 +109,7 @@ class Sender:
             # self.resend_dropped()
             self.send_packets()
 
-            log(f'Window: {self.window()}, SSThresh: {self.ss_thresh}, RTT: {self.rtt / 1000}')
+
 
     def read_input(self):
         """
@@ -139,17 +142,9 @@ class Sender:
             log(f'Received ACK: {msg}')
 
             # mark packet as ACK-ed
-            pkt = self.packets[msg['index']]
+            pkt = self.packets[msg[SEQN]]
             pkt.acked = True
 
-            # update RTT estimate and congestion window
-            # self.rtt = ALPHA * self.rtt + (1 - ALPHA) * (now() - pkt.send_time)
-            # if self.cwnd < self.ss_thresh:
-            #     self.cwnd += 1  # slow start (multiplicative increase)
-            # else:
-            #     self.cwnd += 1 / self.cwnd * CA_FACTOR  # congestion avoidance (additive increase)
-
-            # exit if all packets have been successfully received
             if self.all_acked():
                 log('All done!')
                 exit(0)
@@ -212,20 +207,18 @@ class Sender:
             return None
 
         # ensure checksum header is valid
-        if 'hash' not in msg or 'msg' not in msg:
+        if MSG not in msg:
             return None
 
         # ensure ack fields are valid
-        fields = ['index']
+        fields = [SEQN]
         for f in fields:
-            if f not in msg['msg']:
+            if f not in msg[MSG]:
                 return None
 
         # verify checksum
-        if zlib.crc32(json.dumps(msg['msg'], sort_keys=True).encode('utf-8')) == msg['hash']:
-            return msg['msg']
-        else:
-            return None
+        return msg[MSG]
+        
 
     def window(self):
         """
@@ -234,7 +227,6 @@ class Sender:
             (float) the number of packets that can be in-transit simultaneously
         """
         return 2
-        return max(1.0, self.cwnd)
 
     def all_acked(self):
         """
