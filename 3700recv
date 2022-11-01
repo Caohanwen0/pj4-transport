@@ -22,18 +22,14 @@ class Receiver:
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # the connection to the sender
         self.socket.bind(('0.0.0.0', 0))
-        self.port = self.socket.getsockname()[1] 
+        self.port = self.socket.getsockname()[1]  # the UPD port chosen for this receiver
         log("Bound to port %d" % self.port)
 
-        self.remote_host = None  
-        self.remote_port = None 
+        self.remote_host = None  # the domain name or IP address of the sender
+        self.remote_port = None  # the UDP port of the sender
 
-        self.packets = [] 
-        self.output_num = -1 
-
-    def log(self, message):
-      sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " " + message + "\n")
-      sys.stderr.flush()
+        self.packets = []  # the data whose indices correspond to packets that have been received
+        self.output_index = -1  # the index of the last packet that has been outputted
 
     def run(self):
         """
@@ -103,6 +99,7 @@ class Receiver:
 
         # verify checksum
         return msg[MSG]
+        
 
     def send_ack(self, index):
         """
@@ -112,7 +109,7 @@ class Receiver:
         """
 
         msg = {SEQN: index}
-        msg = { MSG: msg}
+        msg = {MSG: msg}
         log(f'Sending ACK: index={index}')
         self.send(msg)
 
@@ -131,10 +128,10 @@ class Receiver:
         Stops outputting when there is no more data or portion of the data are missing.
         """
 
-        for i in range(self.output_num + 1, len(self.packets)):
+        for i in range(self.output_index + 1, len(self.packets)):
             pkt = self.packets[i]
             if self.was_received(i):
-                self.output_num = i
+                self.output_index = i
                 print(pkt, end='', flush=True)
             else:
                 # missing data, stop outputting
