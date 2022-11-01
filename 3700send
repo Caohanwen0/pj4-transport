@@ -1,0 +1,298 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse
+import socket
+import json
+import select
+import sys
+import zlib
+import time
+from functools import reduce
+
+# constants
+DATA_SIZE = 1425  # the maximum amount of data sent in one packet in bytes
+MAX_MSG_SIZE = 1500  # the maximum size of a message in bytes that the sender expects to receive
+ALPHA = 0.875  # the factor for updating the RTT estimate
+INITIAL_CWND = 1  # the initial value to use for the congestion window in number of packets
+INITIAL_SSTHRESH = 15  # the initial value to use for the slow start threshold in number of packets
+CA_FACTOR = 1  # the factor for increasing the congestion window during congestion avoidance
+
+
+# represents one data packet that is sent to the receiver
+class Packet:
+    def __init__(self, index, data, acked, send_time):
+        """
+        Creates a new Packet/
+        Parameters:
+            index (int): the index of this packet
+            data (str): the data to be sent with this packet
+            acked (bool): whether this packet has been ACK-ed (True) or not (False)
+            send_time (int | None): the time this packet was sent in milliseconds or None if the packet has not been
+                                    sent
+        """
+        self.index = index
+        self.data = data
+        self.acked = acked
+        self.send_time = send_time
+
+    def was_sent(self):
+        """
+        Determines whether this packet was sent already
+        Returns:
+            (bool): Whether the packet was sent (True) or was not sent (False)
+        """
+
+        return self.send_time is not None
+
+    def in_transit(self):
+        """
+        Determines whether this packet is currently in-transit (sent but not ACK-ed)
+        Returns:
+            (bool): Whether the packet is in-transit (True) or not (False)
+        """
+
+        return self.was_sent() and not self.acked
+
+    def generate_msg(self):
+        """
+        Generates the message to send to the receiver for this data packet.
+        Returns:
+            (dict): the message to send to the receiver in json format
+        """
+        self.send_time = now()
+        msg = {'index': self.index, 'data': self.data}
+        hash_value = zlib.crc32(json.dumps(msg, sort_keys=True).encode('utf-8'))
+        msg = {'hash': hash_value, 'msg': msg}
+        return msg
+
+
+# Handles sending data packets and receiving ACks
+class Sender:
+    def __init__(self, host, port):
+        """
+        Creates a new Sender.
+        Parameters:
+            host (str): the domain name or IP address of the remote host
+            port (int): the UPD port number of the remote host
+        """
+
+        self.host = host  # the domain name or IP address of the receiver
+        self.remote_port = int(port)  # the UDP port of the remote receiver
+        log("Sender starting up using port %s" % self.remote_port)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # the connection to the receiver
+        self.socket.bind(('0.0.0.0', 0))
+
+        self.packets = []  # all packets that have been sent to the receiver
+        self.rtt = 1000  # the estimated RTT in milliseconds
+        self.cwnd = INITIAL_CWND  # the maximum number of packets that can be simultaneously in transit
+        self.ss_thresh = INITIAL_SSTHRESH  # the threshold where congestion avoidance starts for the  congestion window
+
+    def run(self):
+        """
+        Runs the sender program, terminating when all data has been successfully sent to the receiver.
+        """
+
+        # read input from the simulator
+        self.read_input()
+
+        # send data packets and respond to ACKs
+        while True:
+            inputs = [self.socket]
+            connections = select.select(inputs, [], [], 0.05)[0]
+            for conn in connections:
+                self.recv_ack(conn)
+
+            # resend dropped packets and send new packets within the current window
+            self.resend_dropped()
+            self.send_packets()
+
+            log(f'Window: {self.window()}, SSThresh: {self.ss_thresh}, RTT: {self.rtt / 1000}')
+
+    def read_input(self):
+        """
+        Reads all input from the simulator and caches the data as packets ready to be sent to the receiver.
+        """
+
+        data = sys.stdin.read(DATA_SIZE)
+        while len(data) > 0:
+            log('read data')
+            self.packets.append(Packet(len(self.packets), data, False, None))
+            data = sys.stdin.read(DATA_SIZE)
+        log(f'number of packets: {len(self.packets)}')
+
+    # handles receiving an ack from the receiver
+    def recv_ack(self, conn):
+        """
+        Handles the receipt of an ACK message from the receiver.
+        Parameters:
+            conn (socket.socket): the connection to receive the ACK message from
+        """
+
+        # parser ack message
+        data, addr = conn.recvfrom(MAX_MSG_SIZE)
+        msg = self.parse_ack(data)
+        if msg is None:
+            # packet was corrupted
+            log('Received corrupted ACK')
+        else:
+            # packet was not corrupted
+            log(f'Received ACK: {msg}')
+
+            # mark packet as ACK-ed
+            pkt = self.packets[msg['index']]
+            pkt.acked = True
+
+            # update RTT estimate and congestion window
+            self.rtt = ALPHA * self.rtt + (1 - ALPHA) * (now() - pkt.send_time)
+            if self.cwnd < self.ss_thresh:
+                self.cwnd += 1  # slow start (multiplicative increase)
+            else:
+                self.cwnd += 1 / self.cwnd * CA_FACTOR  # congestion avoidance (additive increase)
+
+            # exit if all packets have been successfully received
+            if self.all_acked():
+                log('All done!')
+                exit(0)
+
+    def resend_dropped(self):
+        """
+        Resend packets that have not been ACKed within a reasonable period of time
+        """
+
+        timeout = now() - int(self.rtt) * 2
+        for pkt in self.packets:
+            if pkt.in_transit() and pkt.send_time < timeout:
+                # there was a timeout (pkt was dropped)
+                log(f'Resending data to receiver: index={pkt.index}')
+
+                # adjust slow start threshold and congestion window
+                self.ss_thresh = self.cwnd / 2
+                self.cwnd = self.ss_thresh
+
+                # resend packet
+                self.send_msg(pkt.generate_msg())
+
+    def send_packets(self):
+        """
+        Sends all data messages withing the current effective window.
+        """
+        quota = self.window() - self.in_transit()
+        i = 0
+        while i < len(self.packets) and quota > 0:
+            pkt = self.packets[i]
+            if not pkt.was_sent():
+                log(f'Sending data to receiver: index={i}')
+                self.send_msg(pkt.generate_msg())
+                quota -= 1
+            i += 1
+
+    def send_msg(self, message):
+        """
+        Sends a message to the receiver
+        Parameters:
+            message (dict): the json object representing the message to send
+        """
+
+        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
+
+    @classmethod
+    def parse_ack(cls, data):
+        """
+        Parses an ACK message from the receiver, ensuring that it hasn't been corrupted.
+        Parameters:
+            data (bytes): the ack message data received
+        Returns:
+            (dict | None): the json object representing the parsed message or None if the message was corrupted
+        """
+
+        # parse json
+        try:
+            msg = json.loads(data.decode('utf-8'))
+        except json.decoder.JSONDecodeError:
+            return None
+
+        # ensure checksum header is valid
+        if 'hash' not in msg or 'msg' not in msg:
+            return None
+
+        # ensure ack fields are valid
+        fields = ['index']
+        for f in fields:
+            if f not in msg['msg']:
+                return None
+
+        # verify checksum
+        if zlib.crc32(json.dumps(msg['msg'], sort_keys=True).encode('utf-8')) == msg['hash']:
+            return msg['msg']
+        else:
+            return None
+
+    def window(self):
+        """
+        Calculates the number of packets that can be in-transit simultaneously.
+        Returns:
+            (float) the number of packets that can be in-transit simultaneously
+        """
+        return 4
+        return max(1.0, self.cwnd)
+
+    def all_acked(self):
+        """
+        Calculates whether all packets have been successfully received.
+        Returns:
+            (bool): whether all packets have been successfully received (True) or not (False)
+        """
+
+        return reduce(lambda rest, pkt: pkt.acked and rest, self.packets)
+
+    def in_transit(self):
+        """
+        Calculates the number of packets that are currently in-transit
+        (e.g. packets that have been sent but not ACK-ed)
+        Returns:
+            (int): the number of packets currently in-transit
+        """
+
+        return reduce(lambda total, pkt: total + (1 if pkt.in_transit() else 0), self.packets, 0)
+
+
+def log(message):
+    """
+    print a debug message to STDERR
+    Parameters:
+        message (Any): the message to log
+    """
+
+    sys.stderr.write(str(message) + '\n')
+    sys.stderr.flush()
+
+
+def now():
+    """
+    Calculates the current time
+    Returns:
+        (int): the time since the epoch in milliseconds
+    """
+
+    return int(time.time() * 1000)
+
+
+def parse_args():
+    """
+    Parses the command line arguments for the sender program.
+    Arguments take the form `./3700send <recv_host> <recv_port>`
+    Returns:
+        (argparse.Namespace): the object containing the values of the parsed arguments
+    """
+
+    parser = argparse.ArgumentParser(description='send data')
+    parser.add_argument('host', type=str, help='Remote host to connect to')
+    parser.add_argument('port', type=int, help='UDP port number to connect to')
+    return parser.parse_args()
+
+
+# run the sender program
+if __name__ == '__main__':
+    args = parse_args()
+    sender = Sender(args.host, args.port)
+    sender.run()

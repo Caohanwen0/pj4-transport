@@ -1,0 +1,179 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse
+import json
+import select
+import socket
+import sys
+import zlib
+
+
+# Handles receiving/outputting data messages and sending ACKs to the sender
+class Receiver:
+    def __init__(self):
+        """
+        Creates a new Receiver
+        """
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # the connection to the sender
+        self.socket.bind(('0.0.0.0', 0))
+        self.port = self.socket.getsockname()[1]  # the UPD port chosen for this receiver
+        log("Bound to port %d" % self.port)
+
+        self.remote_host = None  # the domain name or IP address of the sender
+        self.remote_port = None  # the UDP port of the sender
+
+        self.packets = []  # the data whose indices correspond to packets that have been received
+        self.output_index = -1  # the index of the last packet that has been outputted
+
+    def run(self):
+        """
+        Runs the receiver program, sending ACKs for each data message receiving and outputting data in order
+        """
+
+        while True:
+            connections = select.select([self.socket], [], [])[0]
+            for conn in connections:
+                data, addr = conn.recvfrom(65535)
+
+                # Grab the remote host/port if we don't already have it
+                if self.remote_host is None:
+                    self.remote_host = addr[0]
+                    self.remote_port = addr[1]
+
+                # handle the message
+                self.recv_msg(data)
+
+    # handles receiving a message from the sender
+    def recv_msg(self, data):
+        """
+        Handles the receipt of a data message from the sender.
+        Parameters:
+            data (bytes): the message data received
+        """
+
+        msg = self.parse_msg(data)
+        if msg is None:
+            # message was corrupted
+            log('Received corrupted message')
+        else:
+            # message was not corrupted
+            log(f"Received data message, idx: {msg['index']}")
+            self.send_ack(msg['index'])
+
+            if not self.was_received(msg['index']):
+                # this is a new packet
+                self.insert_packet(msg['data'], msg['index'])
+                self.output_data()
+
+    @classmethod
+    def parse_msg(cls, data):
+        """
+        Parses a data message from the sender, ensuring that it hasn't been corrupted.
+        Parameters:
+            data (bytes): the message data from the sender
+        Returns:
+            (dict | None): the json object representing the parsed message or None if the message is corrupted
+        """
+
+        # parse json
+        try:
+            msg = json.loads(data.decode('utf-8'))
+        except json.decoder.JSONDecodeError:
+            return None
+
+        # ensure checksum header is valid
+        if 'hash' not in msg or 'msg' not in msg:
+            return None
+
+        # ensure ack fields are valid
+        fields = ['index', 'data']
+        for f in fields:
+            if f not in msg['msg']:
+                return None
+
+        # verify checksum
+        if zlib.crc32(json.dumps(msg['msg'], sort_keys=True).encode('utf-8')) == msg['hash']:
+            return msg['msg']
+        else:
+            return None
+
+    def send_ack(self, index):
+        """
+        Sends an ACK message back the sender for a received data message.
+        Parameters
+            index (int): the index of the data message to acknowledge
+        """
+
+        msg = {'index': index}
+        hash_value = zlib.crc32(json.dumps(msg, sort_keys=True).encode('utf-8'))
+        msg = {'hash': hash_value, 'msg': msg}
+        log(f'Sending ACK: index={index}')
+        self.send(msg)
+
+    def send(self, message):
+        """
+        Sends a message to the sender
+        Parameters:
+            message (dict): the json object representing the message to send
+        """
+
+        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
+
+    def output_data(self):
+        """
+        Outputs any new data in order to STDIN.
+        Stops outputting when there is no more data or portion of the data are missing.
+        """
+
+        for i in range(self.output_index + 1, len(self.packets)):
+            pkt = self.packets[i]
+            if self.was_received(i):
+                self.output_index = i
+                print(pkt, end='', flush=True)
+            else:
+                # missing data, stop outputting
+                return
+
+    def insert_packet(self, pkt, index):
+        """
+        Inserts a piece of data from a received packet at the correct index in the cache.
+        Parameters:
+            pkt (str): the data to cache
+            index (int): the index of the packet associated with this data
+        """
+
+        if index >= len(self.packets):
+            self.packets += [None for _ in range(index - len(self.packets))]
+            self.packets.append(pkt)
+        else:
+            self.packets[index] = pkt
+
+    def was_received(self, index):
+        """
+        Determines whether a packet was received
+        Parameters:
+            index (int): the index of the packet
+        Returns:
+            (bool): whether the packet was received (True) or not (False)
+        """
+        return index < len(self.packets) and self.packets[index] is not None
+
+
+def log(message):
+    """
+    print a debug message to STDERR
+    Parameters:
+        message (Any): the message to log
+    """
+
+    sys.stderr.write(str(message) + '\n')
+    sys.stderr.flush()
+
+
+# runs the receiver program
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='receive data')
+    args = parser.parse_args()
+    sender = Receiver()
+    sender.run()
