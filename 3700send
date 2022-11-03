@@ -4,9 +4,10 @@ import argparse, socket, time, json, select, struct, sys, math, datetime, zlib, 
 from functools import reduce
 
 ENCODING = "utf-8"
-WINDOW_SIZE = 2
+WINDOW_SIZE = 4
 DATA_SIZE = 1425  # the maximum data size of one packet
 MSG_SIZE = 1500  # the maximum size of message
+RTT = 1 # round-trip time
 
 ################################
 
@@ -57,6 +58,8 @@ class Sender:
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
+        self.prev_seq_num = -1
+        self.repeated_acks = 1
 
         self.sent_packets = []
         # todo... about congestion control, yada, yada
@@ -82,7 +85,7 @@ class Sender:
                 self.recv_ack(conn)
 
             # deal with dropped packets
-
+            # Packet 5 was lost
             self.send_packets()
 
 
@@ -104,6 +107,19 @@ class Sender:
             log('Received corrupted ACK packet.')
         else:
             log(f'Received ACK: {json.dumps(msg, indent=2)}')
+            curr_seq_num = int(msg['sequence num'])
+            
+            if self.prev_seq_num == curr_seq_num:
+                log("Repeated ACk")
+                self.repeated_acks += 1
+                if self.repeated_acks == 3:
+                    print("HERE")
+                    self.sent_packets[self.prev_seq_num + 1].send_time = None
+                    self.repeated_acks = 1
+
+                # we need self.prev_seq_num + 1
+
+            self.prev_seq_num = curr_seq_num
 
             packet = self.sent_packets[msg[SEQN]]
             packet.acked = True # mark the packet as ACKed.

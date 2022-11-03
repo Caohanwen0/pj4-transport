@@ -30,6 +30,8 @@ class Receiver:
 
         self.packets = [] 
         self.output_num = -1 
+        self.prev_seq_num = -1
+        self.last_seq_num = None
 
     def send(self, message:dict):
         self.socket.sendto(json.dumps(message).encode(ENCODING), (self.remote_host, self.remote_port))
@@ -56,7 +58,23 @@ class Receiver:
         else:
             # message was not corrupted
             log(f"Received data message with sequence number {msg[SEQN]}")
+            curr_seq_num = int(msg[SEQN])
+            if self.prev_seq_num + 1 != curr_seq_num:
+                #reackk
+                log(f"Received out of order data packet, re-ACK-ing previous one")
+                self.send_ack(self.prev_seq_num)
+                self.last_seq_num = curr_seq_num
+                return
+            
+
+            self.prev_seq_num = curr_seq_num
+            # log(self.prev_seq_num)
+            # log("HEREEEE")
+
             self.send_ack(msg[SEQN])
+            # if self.last_seq_num:
+            #     self.send_ack(self.last_seq_num)
+            #     self.last_seq_num = None
 
             if not self.was_received(msg[SEQN]):
                 # this is a new packet
