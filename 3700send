@@ -7,6 +7,9 @@ ENCODING = "utf-8"
 WINDOW_SIZE = 2
 DATA_SIZE = 1425  # the maximum amount of data sent in one packet in bytes
 MSG_SIZE = 1500  # the maximum size of a message in bytes that the sender expects to receive
+INIT_CWND = 1 # initial congestion window size
+INIT_SSTTRESH = 15
+ALPHA = 0.85 # factor to update rtt estimate
 
 ################################
 
@@ -14,6 +17,7 @@ MSG_SIZE = 1500  # the maximum size of a message in bytes that the sender expect
 SEQN = "sequence num"
 DATA = "data"
 MSG = "msg"
+HASH = "hash"
 
 ################################
 
@@ -41,12 +45,15 @@ class Packet:
     # return dict 
     def get_msg_dct(self)->dict:
         self.send_time = get_time()
-        msg = { MSG: {
+        msg = {
             SEQN: self.seq_num, 
             DATA: self.data
             } 
+        hashed_value = zlib.crc32(json.dumps(msg , sort_keys = True).encode(ENCODING))
+        data = { MSG: msg,
+            HASH: hashed_value 
         }
-        return msg
+        return data
 
 # Handles sending data packets and receiving ACks
 class Sender:
@@ -60,9 +67,13 @@ class Sender:
 
         self.sent_packets = []
         # todo... about congestion control, yada, yada
+
+        self.rtt = 1000
+        self.ss_thresh = INIT_SSTTRESH
+        self.cwnd = INIT_CWND
         
     def window(self): 
-        return WINDOW_SIZE
+        return max(1, self.cwnd)
 
     '''check if all sent packets have been acked'''
     def all_acked(self):
@@ -79,12 +90,23 @@ class Sender:
             inputs = [self.socket]
             connections = select.select(inputs, [], [], 0.05)[0]
             for conn in connections:
-                self.recv_ack(conn)
+                self.receive_ack(conn)
 
-            # deal with dropped packets
-
+            # todo deal with dropped packets
+            self.check_dropped()
             self.send_packets()
 
+    '''resend those packets that are 
+    (1)sent (2) but not acked'''
+    def check_dropped(self):
+        timeout = get_time() - int(self.rtt) * 2
+        for packet in self.sent_packets:
+            if packet.in_transit() and packet.send_time < timeout:
+                log(f"Resending dropped packet , seq number = {packet.seq_num}.")
+                self.ss_thresh = self.cwnd / 2
+                self.cwnd = self.ss_thresh
+
+                self.send_msg(packet.get_msg_dct())
 
     '''read input from stdin'''
     def read_input(self):
@@ -97,7 +119,7 @@ class Sender:
 
 
     '''handle the ACK comming from conn'''
-    def recv_ack(self, conn):
+    def receive_ack(self, conn):
         data, addr = conn.recvfrom(MSG_SIZE)
         msg = self.parse_ack(data)
         if msg is None:
@@ -109,6 +131,13 @@ class Sender:
             packet.acked = True # mark the packet as ACKed.
 
             # todo: congestion control here...
+            self.rtt = ALPHA * self.rtt + (1 - ALPHA) * (get_time() - packet.send_time)
+            if self.cwnd < self.ss_thresh: # when cwnd is below threshhold
+                # exponential growth
+                self.cwnd += 1
+            else:
+                # linear growth
+                self.cwnd += 1 / self.cwnd
 
             # exit if all packets have been successfully received
             if self.all_acked():
@@ -141,15 +170,24 @@ class Sender:
             msg = json.loads(data.decode(ENCODING))
         except json.decoder.JSONDecodeError:
             return None
+
+        # check outer layer
+        valid_fields = [MSG, HASH]
+        for field in valid_fields:
+            if field not in msg:
+                return None
         
-        if MSG not in msg:
-            return None
 
         valid_fields = [SEQN,]
         for field in valid_fields:
             if field not in msg[MSG]: # check field
                 return None
-        return msg[MSG]
+
+        # checksum
+        if zlib.crc32(json.dumps(msg[MSG], sort_keys=True).encode(ENCODING)) == msg[HASH]:
+            return msg[MSG]
+        else:
+            return None
         
 
 
