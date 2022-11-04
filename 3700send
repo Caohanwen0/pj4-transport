@@ -4,7 +4,7 @@ import argparse, socket, time, json, select, struct, sys, math, datetime, zlib, 
 from functools import reduce
 
 ENCODING = "utf-8"
-WINDOW_SIZE = 2
+# WINDOW_SIZE = 2
 DATA_SIZE = 1425  # the maximum amount of data sent in one packet in bytes
 MSG_SIZE = 1500  # the maximum size of a message in bytes that the sender expects to receive
 INIT_CWND = 1 # initial congestion window size
@@ -17,7 +17,7 @@ ALPHA = 0.85 # factor to update rtt estimate
 SEQN = "sequence num"
 DATA = "data"
 MSG = "msg"
-HASH = "hash"
+CKSM = "checksum"
 
 ################################
 
@@ -49,9 +49,9 @@ class Packet:
             SEQN: self.seq_num, 
             DATA: self.data
             } 
-        hashed_value = zlib.crc32(json.dumps(msg , sort_keys = True).encode(ENCODING))
+        checksum = zlib.crc32(json.dumps(msg , sort_keys = True).encode(ENCODING))
         data = { MSG: msg,
-            HASH: hashed_value 
+            CKSM: checksum
         }
         return data
 
@@ -66,7 +66,7 @@ class Sender:
         self.socket.bind(('0.0.0.0', 0))
 
         self.sent_packets = []
-        # todo... about congestion control, yada, yada
+        # About congestion control, yada, yada
 
         self.rtt = 1000
         self.ss_thresh = INIT_SSTTRESH
@@ -172,7 +172,7 @@ class Sender:
             return None
 
         # check outer layer
-        valid_fields = [MSG, HASH]
+        valid_fields = [MSG, CKSM]
         for field in valid_fields:
             if field not in msg:
                 return None
@@ -183,8 +183,8 @@ class Sender:
             if field not in msg[MSG]: # check field
                 return None
 
-        # checksum
-        if zlib.crc32(json.dumps(msg[MSG], sort_keys=True).encode(ENCODING)) == msg[HASH]:
+        # checksum check
+        if zlib.crc32(json.dumps(msg[MSG], sort_keys=True).encode(ENCODING)) == msg[CKSM]:
             return msg[MSG]
         else:
             return None

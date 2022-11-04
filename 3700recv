@@ -1,6 +1,6 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math, datetime
+import argparse, socket, time, json, select, struct, sys, math, datetime, zlib
 
 ENCODING = "utf-8"
 
@@ -10,6 +10,7 @@ ENCODING = "utf-8"
 SEQN = "sequence num"
 DATA = "data"
 MSG = "msg"
+CKSM = "checksum"
 
 ################################
 
@@ -72,21 +73,30 @@ class Receiver:
         except json.decoder.JSONDecodeError:
             return None
 
-        if MSG not in decoded:
-            return None
+        fields = [MSG, CKSM]
+        for field in fields:
+            if field not in decoded:
+                return None
 
         fields = [SEQN, DATA] # check dict fields
         for f in fields:
             if f not in decoded[MSG]:
                 return None
-        return decoded[MSG]
+
+        # checksum
+        if zlib.crc32(json.dumps(decoded[MSG], sort_keys=True).encode(ENCODING)) == decoded[CKSM]:
+            return decoded[MSG]
+        else:
+            return None
         
 
     '''send ACK back to sender for receiving packet.'''
     def send_ack(self, seq_num):
-        msg = {MSG: {SEQN: seq_num} }
+        msg = {SEQN: seq_num}
+        checksum = zlib.crc32(json.dumps(msg, sort_keys = True).encode(ENCODING)) 
+        data = {MSG: msg, CKSM: checksum}
         log(f'Sending ACK with sequence number {seq_num}.')
-        self.send(msg)
+        self.send(data)
 
     def send(self, message:dict):
         self.socket.sendto(json.dumps(message).encode(ENCODING), (self.remote_host, self.remote_port))
